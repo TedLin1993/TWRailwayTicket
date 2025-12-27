@@ -343,15 +343,8 @@ class TRABookingBrowser:
             r'code\D*(\d{6,8})',
         ], text)
         
-        # 如果嚴格模式沒找到，才嘗試寬鬆模式，但要非常小心
-        if not booking_code:
-            # 嘗試找看起來像代碼的孤立數字 (前後有空白或標點)
-            # 排除 1933 (緊急電話)
-            candidates = re.findall(r'(?<!\d)(\d{6,8})(?!\d)', text)
-            for cand in candidates:
-                if cand != "000000" and not cand.startswith("1933"):
-                     booking_code = cand
-                     break
+        # 如果嚴格模式沒找到，不要再嘗試寬鬆模式，以免誤判 (例如抓到 footer 的電話與分機)
+        # 只要頁面有 "訂票代碼" 關鍵字，上面的 regex 應該就能抓到
         
         # 車次
         train_no = extract_field([
@@ -369,7 +362,8 @@ class TRABookingBrowser:
         # 座位
         seat_info = extract_field([
             r'(\d+車\d+號)',
-            r'座位\D*(\S+)',
+            r'座位\D*(\d+車\d+號)',
+            r'座位[：:]\s*(\S+)', # 保留這個但放在後面
         ], text)
         
         # 票價

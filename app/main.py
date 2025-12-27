@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 
@@ -7,8 +8,8 @@ from .browser import tra_browser
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理"""
-    # 啟動時初始化瀏覽器 (使用有頭模式以避免機器人驗證失敗)
-    await tra_browser.start(headless=False)
+    # 啟動時初始化瀏覽器 (使用無頭模式背景執行)
+    await tra_browser.start(headless=True)
     yield
     # 關閉時清理瀏覽器
     await tra_browser.stop()
@@ -49,15 +50,7 @@ async def create_booking(booking: BookingRequest):
     """
     送出訂票請求至台鐵官方系統 (使用瀏覽器自動化)
     
-    **依車次訂票：**
-    - **order_type**: "BY_TRAIN"
-    - **train_no**: 車次號碼 (如：122)
-    
-    **依時段訂票：**
-    - **order_type**: "BY_TIME"
-    - **start_time** / **end_time**: 時間範圍
-    
-    **注意：** 訂票過程約需 10-15 秒
+    **注意：** 系統會自動重試直到訂票成功為止，每次失敗間隔 10 秒。
     """
     # 驗證車站
     if booking.start_station not in STATION_CODES:
@@ -72,29 +65,47 @@ async def create_booking(booking: BookingRequest):
     # 格式化日期
     ride_date_str = booking.ride_date.strftime("%Y/%m/%d")
     
-    # 執行訂票
-    result = await tra_browser.book_ticket(
-        pid=booking.pid,
-        start_station=booking.start_station,
-        end_station=booking.end_station,
-        ride_date=ride_date_str,
-        order_type=booking.order_type,
-        train_no=booking.train_no,
-        start_time=booking.start_time,
-        end_time=booking.end_time,
-        qty=booking.qty
-    )
-    
-    return BookingResponse(
-        success=result["success"],
-        message=result["message"],
-        booking_code=result.get("booking_code"),
-        train_no=result.get("train_no"),
-        train_type=result.get("train_type"),
-        seat_info=result.get("seat_info"),
-        price=result.get("price"),
-        html_response=None
-    )
+    # 無限重試循環
+    retry_count = 0
+    while True:
+        retry_count += 1
+        print(f"\n--- 開始第 {retry_count} 次訂票嘗試 ---")
+        try:
+            # 執行訂票
+            result = await tra_browser.book_ticket(
+                pid=booking.pid,
+                start_station=booking.start_station,
+                end_station=booking.end_station,
+                ride_date=ride_date_str,
+                order_type=booking.order_type,
+                train_no=booking.train_no,
+                start_time=booking.start_time,
+                end_time=booking.end_time,
+                qty=booking.qty
+            )
+            
+            if result["success"]:
+                print(f"訂票成功！ (嘗試次數: {retry_count})")
+                return BookingResponse(
+                    success=result["success"],
+                    message=result["message"],
+                    booking_code=result.get("booking_code"),
+                    train_no=result.get("train_no"),
+                    train_type=result.get("train_type"),
+                    seat_info=result.get("seat_info"),
+                    price=result.get("price"),
+                    html_response=None
+                )
+            
+            # 失敗處理
+            print(f"訂票失敗: {result['message']}")
+            print("等待 10 秒後重試...")
+            await asyncio.sleep(10)
+            
+        except Exception as e:
+            print(f"發生未預期錯誤: {e}")
+            print("等待 10 秒後重試...")
+            await asyncio.sleep(10)
 
 
 @app.get("/stations", tags=["車站"])
