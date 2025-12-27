@@ -1,80 +1,104 @@
 from fastapi import FastAPI, HTTPException
-from datetime import date
-import random
-import string
+from contextlib import asynccontextmanager
 
-from .models import BookingRequest, BookingResponse, TrainType
+from .models import BookingRequest, BookingResponse, STATION_CODES
+from .browser import tra_browser
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """應用程式生命週期管理"""
+    # 啟動時初始化瀏覽器
+    await tra_browser.start(headless=True)
+    yield
+    # 關閉時清理瀏覽器
+    await tra_browser.stop()
+
 
 app = FastAPI(
     title="台鐵訂票系統",
     description="""
 ## 🚂 台灣鐵路訂票 API
 
-提供簡單的訂票功能，送出訂票請求即可完成訂票。
+使用 Playwright 瀏覽器自動化連接台鐵官方訂票系統。
 
 ### 使用方式
 使用 `/booking` 端點提交訂票資料
+
+### 注意事項
+- 系統使用真實瀏覽器模擬訂票流程
+- 首次訂票可能需要較長時間 (約 10-15 秒)
     """,
-    version="1.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
-
-
-def generate_booking_code() -> str:
-    """產生 8 碼訂票代碼"""
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
 @app.get("/", tags=["首頁"])
 def root():
     """API 首頁"""
     return {
-        "message": "歡迎使用台鐵訂票系統",
+        "message": "歡迎使用台鐵訂票系統 (Playwright 版)",
         "docs": "/docs",
-        "version": "1.0.0"
+        "version": "2.0.0",
+        "stations": list(STATION_CODES.keys())
     }
 
 
 @app.post("/booking", response_model=BookingResponse, tags=["訂票"], summary="送出訂票")
-def create_booking(booking: BookingRequest):
+async def create_booking(booking: BookingRequest):
     """
-    送出訂票請求
+    送出訂票請求至台鐵官方系統 (使用瀏覽器自動化)
     
     **必填欄位：**
-    - **from_station**: 起站名稱 (如：台北)
-    - **to_station**: 終站名稱 (如：高雄)
-    - **train_no**: 車次號碼 (如：110)
-    - **travel_date**: 乘車日期 (YYYY-MM-DD)
-    - **passenger_name**: 乘客姓名
-    - **passenger_id**: 身分證字號 (10碼)
-    - **phone**: 聯絡電話
-    - **seat_count**: 訂票張數 (1-6張，預設1張)
-    - **train_type**: 列車類型 (自強號/莒光號/區間車/普悠瑪/太魯閣)
-    """
-    # 驗證乘車日期
-    if booking.travel_date < date.today():
-        raise HTTPException(status_code=400, detail="乘車日期不可早於今日")
+    - **pid**: 身分證字號 (10碼)
+    - **start_station**: 起站名稱 (如：臺北、臺中)
+    - **end_station**: 終站名稱
+    - **ride_date**: 乘車日期 (YYYY-MM-DD)
+    - **start_time**: 起始時間 (HH:MM)
+    - **end_time**: 結束時間 (HH:MM)
+    - **qty**: 訂票張數 (1-6張)
     
-    # 模擬訂票成功
-    booking_code = generate_booking_code()
+    **注意：** 訂票過程約需 10-15 秒
+    """
+    # 驗證車站
+    if booking.start_station not in STATION_CODES:
+        raise HTTPException(status_code=400, detail=f"找不到車站: {booking.start_station}")
+    if booking.end_station not in STATION_CODES:
+        raise HTTPException(status_code=400, detail=f"找不到車站: {booking.end_station}")
+    
+    # 格式化日期
+    ride_date_str = booking.ride_date.strftime("%Y/%m/%d")
+    
+    # 執行訂票
+    result = await tra_browser.book_ticket(
+        pid=booking.pid,
+        start_station=booking.start_station,
+        end_station=booking.end_station,
+        ride_date=ride_date_str,
+        start_time=booking.start_time,
+        end_time=booking.end_time,
+        qty=booking.qty
+    )
     
     return BookingResponse(
-        success=True,
-        message="訂票成功",
-        booking_code=booking_code,
-        booking_details={
-            "乘客姓名": booking.passenger_name,
-            "起站": booking.from_station,
-            "終站": booking.to_station,
-            "車次": booking.train_no,
-            "車種": booking.train_type.value,
-            "乘車日期": str(booking.travel_date),
-            "張數": booking.seat_count,
-            "聯絡電話": booking.phone
-        }
+        success=result["success"],
+        message=result["message"],
+        booking_code=result.get("booking_code"),
+        train_no=result.get("train_no"),
+        train_type=result.get("train_type"),
+        seat_info=result.get("seat_info"),
+        price=result.get("price"),
+        html_response=None
     )
+
+
+@app.get("/stations", tags=["車站"])
+def get_stations():
+    """取得所有車站代碼"""
+    return STATION_CODES
 
 
 @app.get("/health", tags=["健康檢查"])
 def health_check():
     """健康檢查"""
-    return {"status": "ok"}
+    return {"status": "ok", "browser": "playwright"}
