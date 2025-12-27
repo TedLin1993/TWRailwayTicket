@@ -1,14 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 
-from .models import BookingRequest, BookingResponse, STATION_CODES
+from .models import BookingRequest, BookingResponse, STATION_CODES, OrderType
 from .browser import tra_browser
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理"""
-    # 啟動時初始化瀏覽器
-    await tra_browser.start(headless=True)
+    # 啟動時初始化瀏覽器 (使用有頭模式以避免機器人驗證失敗)
+    await tra_browser.start(headless=False)
     yield
     # 關閉時清理瀏覽器
     await tra_browser.stop()
@@ -49,14 +49,13 @@ async def create_booking(booking: BookingRequest):
     """
     送出訂票請求至台鐵官方系統 (使用瀏覽器自動化)
     
-    **必填欄位：**
-    - **pid**: 身分證字號 (10碼)
-    - **start_station**: 起站名稱 (如：臺北、臺中)
-    - **end_station**: 終站名稱
-    - **ride_date**: 乘車日期 (YYYY-MM-DD)
-    - **start_time**: 起始時間 (HH:MM)
-    - **end_time**: 結束時間 (HH:MM)
-    - **qty**: 訂票張數 (1-6張)
+    **依車次訂票：**
+    - **order_type**: "BY_TRAIN"
+    - **train_no**: 車次號碼 (如：122)
+    
+    **依時段訂票：**
+    - **order_type**: "BY_TIME"
+    - **start_time** / **end_time**: 時間範圍
     
     **注意：** 訂票過程約需 10-15 秒
     """
@@ -65,6 +64,10 @@ async def create_booking(booking: BookingRequest):
         raise HTTPException(status_code=400, detail=f"找不到車站: {booking.start_station}")
     if booking.end_station not in STATION_CODES:
         raise HTTPException(status_code=400, detail=f"找不到車站: {booking.end_station}")
+    
+    # 驗證依車次訂票必須有車次
+    if booking.order_type == OrderType.BY_TRAIN and not booking.train_no:
+        raise HTTPException(status_code=400, detail="依車次訂票時必須提供 train_no")
     
     # 格式化日期
     ride_date_str = booking.ride_date.strftime("%Y/%m/%d")
@@ -75,6 +78,8 @@ async def create_booking(booking: BookingRequest):
         start_station=booking.start_station,
         end_station=booking.end_station,
         ride_date=ride_date_str,
+        order_type=booking.order_type,
+        train_no=booking.train_no,
         start_time=booking.start_time,
         end_time=booking.end_time,
         qty=booking.qty

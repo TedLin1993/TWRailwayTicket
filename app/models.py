@@ -82,18 +82,23 @@ class BookingRequest(BaseModel):
     start_station: str = Field(..., description="起站名稱，如：台北、臺中")
     end_station: str = Field(..., description="終站名稱，如：高雄")
     ride_date: date = Field(..., description="乘車日期")
-    start_time: str = Field(default="00:00", description="起始時間 (HH:MM)")
-    end_time: str = Field(default="23:59", description="結束時間 (HH:MM)")
     qty: int = Field(default=1, ge=1, le=6, description="訂票張數 (1-6)")
+    
+    # 依車次訂票
+    order_type: OrderType = Field(default=OrderType.BY_TRAIN, description="訂票方式 (BY_TRAIN 或 BY_TIME)")
+    train_no: Optional[str] = Field(default=None, description="車次號碼 (依車次訂票時必填，如：122)")
+    
+    # 依時段訂票
+    start_time: str = Field(default="00:00", description="起始時間 (HH:MM，依時段訂票時使用)")
+    end_time: str = Field(default="23:59", description="結束時間 (HH:MM，依時段訂票時使用)")
     
     cust_id_type: CustIdType = Field(default=CustIdType.PERSON_ID, description="證件類型")
     trip_type: TripType = Field(default=TripType.ONEWAY, description="行程類型")
-    order_type: OrderType = Field(default=OrderType.BY_TIME, description="訂票方式")
     seat_pref: SeatPref = Field(default=SeatPref.NONE, description="座位偏好")
     train_types: List[TrainType] = Field(
         default=[TrainType.TAROKO_PUYUMA, TrainType.TZEQIANG, TrainType.JUGUANG, 
                  TrainType.FUXING, TrainType.LOCAL_EXPRESS, TrainType.LOCAL],
-        description="列車類型 (可多選)"
+        description="列車類型 (依時段訂票時使用)"
     )
 
     model_config = {
@@ -104,8 +109,8 @@ class BookingRequest(BaseModel):
                     "start_station": "臺中",
                     "end_station": "臺北",
                     "ride_date": "2025-12-28",
-                    "start_time": "12:30",
-                    "end_time": "20:30",
+                    "order_type": "BY_TRAIN",
+                    "train_no": "122",
                     "qty": 1
                 }
             ]
