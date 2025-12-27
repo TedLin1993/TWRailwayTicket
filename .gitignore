@@ -50,3 +50,5 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+booking_result.png
+captcha.png
