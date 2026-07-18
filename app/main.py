@@ -1,35 +1,56 @@
 import asyncio
-from fastapi import FastAPI, HTTPException
+import os
+
+from fastapi import FastAPI, HTTPException, Request
 from contextlib import asynccontextmanager
 
-from .models import BookingRequest, BookingResponse, STATION_CODES, OrderType
+from .models import (
+    BookingRequest,
+    BookingResponse,
+    OrderType,
+    STATION_CODES,
+    THSRBookingRequest,
+    THSRBookingResponse,
+    THSR_STATIONS,
+)
 from .browser import tra_browser
+from .thsr_browser import thsr_browser
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理"""
     # 啟動時初始化瀏覽器 (使用無頭模式背景執行)
     await tra_browser.start(headless=True)
-    yield
-    # 關閉時清理瀏覽器
-    await tra_browser.stop()
+    try:
+        thsr_headless = os.getenv("THSR_HEADLESS", "true").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        await thsr_browser.start(headless=thsr_headless)
+        yield
+    finally:
+        # 關閉時清理瀏覽器；高鐵瀏覽器啟動失敗時也會關閉台鐵瀏覽器
+        await thsr_browser.stop()
+        await tra_browser.stop()
 
 
 app = FastAPI(
-    title="台鐵訂票系統",
+    title="台鐵與高鐵訂票系統",
     description="""
-## 🚂 台灣鐵路訂票 API
+## 🚂 台灣鐵路與高鐵訂票 API
 
-使用 Playwright 瀏覽器自動化連接台鐵官方訂票系統。
+使用 Playwright 瀏覽器自動化連接台鐵與高鐵官方訂票系統。
 
 ### 使用方式
-使用 `/booking` 端點提交訂票資料
+使用 `/booking` 提交台鐵訂票資料，或使用 `/thsr/booking` 提交高鐵訂票資料。
 
 ### 注意事項
 - 系統使用真實瀏覽器模擬訂票流程
 - 首次訂票可能需要較長時間 (約 10-15 秒)
     """,
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -38,10 +59,11 @@ app = FastAPI(
 def root():
     """API 首頁"""
     return {
-        "message": "歡迎使用台鐵訂票系統 (Playwright 版)",
+        "message": "歡迎使用台鐵與高鐵訂票系統 (Playwright 版)",
         "docs": "/docs",
-        "version": "2.0.0",
-        "stations": list(STATION_CODES.keys())
+        "version": "2.1.0",
+        "tra_stations": list(STATION_CODES.keys()),
+        "thsr_stations": THSR_STATIONS,
     }
 
 
@@ -114,7 +136,28 @@ def get_stations():
     return STATION_CODES
 
 
+@app.post(
+    "/thsr/booking",
+    response_model=THSRBookingResponse,
+    tags=["高鐵訂票"],
+    summary="送出高鐵訂票",
+)
+async def create_thsr_booking(booking: THSRBookingRequest, request: Request):
+    """持續重試單程成人票訂位，直到成功或呼叫端中斷連線。"""
+    retry_count = 0
+    while True:
+        retry_count += 1
+        result = await thsr_browser.book_ticket(booking)
+        if result["success"]:
+            print(f"高鐵訂票成功！(嘗試次數: {retry_count})")
+            return THSRBookingResponse(**result)
+        print(f"高鐵訂票失敗 (第 {retry_count} 次): {result['message']}")
+        if await request.is_disconnected():
+            raise HTTPException(status_code=499, detail="用戶端已中斷連線")
+        await asyncio.sleep(10)
+
+
 @app.get("/health", tags=["健康檢查"])
 def health_check():
     """健康檢查"""
-    return {"status": "ok", "browser": "playwright"}
+    return {"status": "ok", "browser": "playwright", "services": ["tra", "thsr"]}

@@ -1,10 +1,17 @@
 """
 台鐵訂票系統 - 資料模型
 """
-from datetime import date, time
+from datetime import date, datetime, time
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class CustIdType(str, Enum):
@@ -148,3 +155,164 @@ class BookingResponse(BaseModel):
     seat_info: Optional[str] = None
     price: Optional[int] = None
     html_response: Optional[str] = None
+
+
+class THSRDepartureTime(str, Enum):
+    """高鐵訂位網站使用的半小時時段代碼。"""
+
+    T_0001 = "1201A"
+    T_0030 = "1230A"
+    T_0500 = "500A"
+    T_0530 = "530A"
+    T_0600 = "600A"
+    T_0630 = "630A"
+    T_0700 = "700A"
+    T_0730 = "730A"
+    T_0800 = "800A"
+    T_0830 = "830A"
+    T_0900 = "900A"
+    T_0930 = "930A"
+    T_1000 = "1000A"
+    T_1030 = "1030A"
+    T_1100 = "1100A"
+    T_1130 = "1130A"
+    T_1200 = "1200N"
+    T_1230 = "1230P"
+    T_1300 = "100P"
+    T_1330 = "130P"
+    T_1400 = "200P"
+    T_1430 = "230P"
+    T_1500 = "300P"
+    T_1530 = "330P"
+    T_1600 = "400P"
+    T_1630 = "430P"
+    T_1700 = "500P"
+    T_1730 = "530P"
+    T_1800 = "600P"
+    T_1830 = "630P"
+    T_1900 = "700P"
+    T_1930 = "730P"
+    T_2000 = "800P"
+    T_2030 = "830P"
+    T_2100 = "900P"
+    T_2130 = "930P"
+    T_2200 = "1000P"
+    T_2230 = "1030P"
+    T_2300 = "1100P"
+    T_2330 = "1130P"
+
+
+THSR_STATIONS = {
+    1: "南港",
+    2: "台北",
+    3: "板橋",
+    4: "桃園",
+    5: "新竹",
+    6: "苗栗",
+    7: "台中",
+    8: "彰化",
+    9: "雲林",
+    10: "嘉義",
+    11: "台南",
+    12: "左營",
+}
+
+
+class THSRBookingRequest(BaseModel):
+    """高鐵訂票請求；同時接受原 THSR-Colly API 的 PascalCase 欄位。"""
+
+    id: str = Field(
+        ...,
+        min_length=8,
+        max_length=20,
+        validation_alias=AliasChoices("Id", "id"),
+        serialization_alias="Id",
+        description="身分證字號或護照號碼",
+    )
+    email: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("Email", "email"),
+        serialization_alias="Email",
+    )
+    phone: str = Field(
+        ...,
+        min_length=8,
+        max_length=20,
+        validation_alias=AliasChoices("Phone", "phone"),
+        serialization_alias="Phone",
+    )
+    start_station: int = Field(
+        ...,
+        ge=1,
+        le=12,
+        validation_alias=AliasChoices("StartStation", "start_station"),
+        serialization_alias="StartStation",
+    )
+    dest_station: int = Field(
+        ...,
+        ge=1,
+        le=12,
+        validation_alias=AliasChoices("DestStation", "dest_station"),
+        serialization_alias="DestStation",
+    )
+    ride_date: date = Field(
+        ...,
+        validation_alias=AliasChoices("Date", "ride_date"),
+        serialization_alias="Date",
+    )
+    departure_time: Optional[THSRDepartureTime] = Field(
+        default=None,
+        validation_alias=AliasChoices("Time", "departure_time"),
+        serialization_alias="Time",
+        description="依時段訂票時使用，例如 700P",
+    )
+    train_no: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=8,
+        validation_alias=AliasChoices("TrainNo", "train_no"),
+        serialization_alias="TrainNo",
+    )
+    head_count: int = Field(
+        ...,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("HeadCount", "head_count"),
+        serialization_alias="HeadCount",
+    )
+    passenger_ids: List[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("PassengerIds", "passenger_ids"),
+        serialization_alias="PassengerIds",
+        description="早鳥票乘客證件號碼；若未提供則使用原價全票",
+    )
+
+    model_config = ConfigDict(populate_by_name=True, str_strip_whitespace=True)
+
+    @field_validator("ride_date", mode="before")
+    @classmethod
+    def parse_legacy_date(cls, value):
+        if isinstance(value, str) and "/" in value:
+            return datetime.strptime(value, "%Y/%m/%d").date()
+        return value
+
+    @model_validator(mode="after")
+    def validate_route_and_booking_method(self):
+        if self.start_station == self.dest_station:
+            raise ValueError("起站與到達站不可相同")
+        if not self.train_no and not self.departure_time:
+            raise ValueError("TrainNo 與 Time 至少必須提供一個")
+        if self.passenger_ids and len(self.passenger_ids) != self.head_count:
+            raise ValueError("PassengerIds 數量必須與 HeadCount 相同")
+        return self
+
+
+class THSRBookingResponse(BaseModel):
+    """高鐵訂票結果。"""
+
+    success: bool
+    message: str
+    booking_code: Optional[str] = None
+    train_no: Optional[str] = None
+    seat_info: Optional[str] = None
+    price: Optional[int] = None

@@ -25,9 +25,19 @@ class TRABookingBrowser:
     async def stop(self):
         """關閉瀏覽器"""
         if self.browser:
-            await self.browser.close()
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
+            finally:
+                self.browser = None
         if self.playwright:
-            await self.playwright.stop()
+            try:
+                await self.playwright.stop()
+            except Exception:
+                pass
+            finally:
+                self.playwright = None
     
     async def book_ticket(
         self,
