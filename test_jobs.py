@@ -1,10 +1,13 @@
 import asyncio
+import os
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from app.jobs import JobManager, cancellable_sleep
 from app.main import (
+    API_KEY_ENV,
     app,
+    _api_key_matches,
     create_booking,
     create_thsr_booking,
     health_check,
@@ -16,6 +19,75 @@ from app.models import BookingRequest, OrderType, THSRBookingRequest
 from app.browser import tra_browser
 from app.thsr_browser import thsr_browser
 from fastapi import HTTPException
+
+
+async def asgi_get(path: str, headers: list[tuple[bytes, bytes]] | None = None):
+    """不額外依賴 HTTP client 的最小 ASGI GET 測試工具。"""
+    messages = []
+    request_sent = False
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers or [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    await app(scope, receive, send)
+    status = next(message["status"] for message in messages if message["type"] == "http.response.start")
+    return status
+
+
+class ApiKeyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_is_public(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(await asgi_get("/health"), 200)
+
+    async def test_missing_server_api_key_returns_503(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(await asgi_get("/docs"), 503)
+
+    async def test_missing_or_wrong_api_key_returns_401(self):
+        with patch.dict(os.environ, {API_KEY_ENV: "correct-key"}, clear=True):
+            self.assertEqual(await asgi_get("/openapi.json"), 401)
+            self.assertEqual(
+                await asgi_get("/openapi.json", [(b"x-api-key", b"wrong-key")]),
+                401,
+            )
+
+    async def test_accepts_x_api_key_and_bearer_token(self):
+        with patch.dict(os.environ, {API_KEY_ENV: "correct-key"}, clear=True):
+            self.assertEqual(
+                await asgi_get("/openapi.json", [(b"x-api-key", b"correct-key")]),
+                200,
+            )
+            self.assertEqual(
+                await asgi_get(
+                    "/openapi.json",
+                    [(b"authorization", b"Bearer correct-key")],
+                ),
+                200,
+            )
+
+    def test_api_key_compare_handles_unicode(self):
+        self.assertTrue(_api_key_matches("密鑰", "密鑰"))
+        self.assertFalse(_api_key_matches("錯誤", "密鑰"))
 
 
 class JobManagerTests(unittest.IsolatedAsyncioTestCase):

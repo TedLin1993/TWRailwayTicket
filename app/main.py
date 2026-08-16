@@ -1,9 +1,11 @@
 import asyncio
 import os
+import secrets
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from contextlib import asynccontextmanager
+from starlette.responses import JSONResponse
 
 from .browser_manager import browser_manager
 from .jobs import job_manager, cancellable_sleep
@@ -18,6 +20,31 @@ from .models import (
 )
 from .browser import tra_browser
 from .thsr_browser import thsr_browser
+
+API_KEY_ENV = "BOOKING_API_KEY"
+PUBLIC_PATHS = {"/health"}
+
+
+def _extract_api_key(request: Request) -> str | None:
+    """從 Bearer token 或 X-API-Key Header 取得 API key。"""
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, token = authorization.partition(" ")
+    if separator and scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+
+    api_key = request.headers.get("X-API-Key")
+    return api_key.strip() if api_key and api_key.strip() else None
+
+
+def _api_key_matches(provided: str | None, expected: str) -> bool:
+    """使用常數時間比較 API key。"""
+    if not provided or not expected:
+        return False
+    return secrets.compare_digest(
+        provided.encode("utf-8"),
+        expected.encode("utf-8"),
+    )
+
 
 def _extract_job_id(request: Request) -> str:
     """從 Request Header 提取 X-Job-ID，或自動產生 12 碼 UUID。"""
@@ -67,6 +94,29 @@ app = FastAPI(
     version="2.1.0",
     lifespan=lifespan
 )
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """除健康檢查外，所有 HTTP 端點都必須提供有效 API key。"""
+    if request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    expected = os.getenv(API_KEY_ENV, "").strip()
+    if not expected:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"伺服器尚未設定 {API_KEY_ENV}"},
+        )
+
+    if not _api_key_matches(_extract_api_key(request), expected):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "API key 無效或未提供"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return await call_next(request)
 
 
 @app.get("/", tags=["首頁"])

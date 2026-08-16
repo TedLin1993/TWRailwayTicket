@@ -11,6 +11,7 @@
 - 台灣高鐵依車次或時段訂票
 - 自動處理訂票流程與圖形驗證碼
 - 訂票失敗後每 10 秒持續重試
+- 以 API key 保護訂票、工作管理與 API 文件
 - OpenAPI 文件與健康檢查端點
 - 相容高鐵舊版 PascalCase 與新版 snake_case 請求欄位
 
@@ -41,7 +42,8 @@ playwright install --with-deps chromium
 ## 啟動
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+BOOKING_API_KEY='請替換為長隨機字串' \
+  uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 啟動後可開啟：
@@ -49,6 +51,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - Swagger UI：<http://localhost:8000/docs>
 - ReDoc：<http://localhost:8000/redoc>
 - 健康檢查：<http://localhost:8000/health>
+
+除 `/health` 外，所有端點（包含 `/docs`、`/redoc` 與 `/openapi.json`）都必須提供下列其中一種 Header：
+
+```text
+Authorization: Bearer <BOOKING_API_KEY>
+X-API-Key: <BOOKING_API_KEY>
+```
+
+例如：
+
+```bash
+curl http://localhost:8000/stations \
+  -H "Authorization: Bearer ${BOOKING_API_KEY}"
+```
 
 高鐵瀏覽器預設以 headless 模式執行。若要顯示瀏覽器視窗以便除錯：
 
@@ -190,7 +206,7 @@ python test_ocr.py
 - 台鐵與高鐵官方網站改版後，Playwright selector 或訂票流程可能需要同步調整。
 - 訂票呼叫可能耗時較久；目前失敗時會每 10 秒持續重試，不設最大次數。呼叫端與反向代理的 timeout 應配合調整。
 - OCR 無法保證每次辨識成功，短時間大量請求也可能觸發官方網站的限制。
-- 本服務沒有內建驗證、授權、流量限制或資料加密，不應直接暴露在公開網路。
+- API key 只提供單一共享密鑰驗證；公開部署仍應使用 HTTPS，並視需求加上來源限制或反向代理限流。
 - 訂位成功不代表已付款或完成取票，請依官方流程在期限內完成後續作業。
 
 ## 免責聲明
