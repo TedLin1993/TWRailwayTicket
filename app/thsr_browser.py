@@ -8,9 +8,9 @@ from playwright.async_api import (
     Browser,
     Locator,
     Page,
-    async_playwright,
 )
 
+from .browser_manager import BrowserManager, browser_manager
 from .models import THSRBookingRequest, THSRDepartureTime
 
 
@@ -18,59 +18,33 @@ class THSRBookingBrowser:
     """以高鐵官方網路訂位頁執行單程成人票訂位。"""
 
     BOOKING_URL = "https://irs.thsrc.com.tw/IMINT/"
-    BROWSER_ARGS = ["--disable-blink-features=AutomationControlled"]
-    HEADLESS_CHANNEL = "chromium"
+    BROWSER_ARGS = BrowserManager.OPTIMIZED_ARGS
+    HEADLESS_CHANNEL = BrowserManager.HEADLESS_CHANNEL
 
     def __init__(self):
         self.browser: Optional[Browser] = None
         self.playwright = None
-        self._ocr = None
         self._user_agent: Optional[str] = None
         self._start_lock = asyncio.Lock()
 
     async def start(self, headless: bool = True):
         """啟動高鐵訂票專用瀏覽器。"""
         async with self._start_lock:
-            if self.browser:
-                return
-            self.playwright = await async_playwright().start()
-            launch_options = {
-                "headless": headless,
-                "args": self.BROWSER_ARGS,
-            }
-            if headless:
-                launch_options["channel"] = self.HEADLESS_CHANNEL
-            self.browser = await self.playwright.chromium.launch(**launch_options)
-            probe_context = await self.browser.new_context()
-            probe_page = await probe_context.new_page()
-            try:
-                browser_user_agent = await probe_page.evaluate("navigator.userAgent")
-                self._user_agent = self._normalize_user_agent(browser_user_agent)
-            finally:
-                await probe_context.close()
+            self.browser = await browser_manager.start(headless=headless)
+            self.playwright = browser_manager.playwright
+            self._user_agent = browser_manager.user_agent
 
     async def stop(self):
         """關閉瀏覽器及 Playwright runtime。"""
-        if self.browser:
-            try:
-                await self.browser.close()
-            except Exception:
-                pass
-            finally:
-                self.browser = None
-        if self.playwright:
-            try:
-                await self.playwright.stop()
-            except Exception:
-                pass
-            finally:
-                self.playwright = None
-                self._user_agent = None
+        await browser_manager.stop()
+        self.browser = None
+        self.playwright = None
+        self._user_agent = None
 
     @staticmethod
     def _normalize_user_agent(user_agent: str) -> str:
         """新版 Headless 仍帶 HeadlessChrome；改為對應的正常 Chrome UA。"""
-        return user_agent.replace("HeadlessChrome/", "Chrome/")
+        return BrowserManager.normalize_user_agent(user_agent)
 
     async def _new_context(self):
         if not self.browser:
@@ -81,11 +55,8 @@ class THSRBookingBrowser:
         return await self.browser.new_context(**options)
 
     def _recognize_captcha(self, image: bytes) -> str:
-        if self._ocr is None:
-            import ddddocr
-
-            self._ocr = ddddocr.DdddOcr(show_ad=False)
-        result = self._ocr.classification(image)
+        ocr = browser_manager.get_ocr()
+        result = ocr.classification(image)
         return re.sub(r"[^0-9A-Za-z]", "", result).upper()[:4]
 
     async def book_ticket(self, booking: THSRBookingRequest) -> dict:

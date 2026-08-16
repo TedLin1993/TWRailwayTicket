@@ -155,6 +155,7 @@ class BookingResponse(BaseModel):
     seat_info: Optional[str] = None
     price: Optional[int] = None
     html_response: Optional[str] = None
+    job_id: Optional[str] = None
 
 
 class THSRDepartureTime(str, Enum):
@@ -316,3 +317,4 @@ class THSRBookingResponse(BaseModel):
     train_no: Optional[str] = None
     seat_info: Optional[str] = None
     price: Optional[int] = None
+    job_id: Optional[str] = None

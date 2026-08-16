@@ -2,10 +2,11 @@
 台鐵訂票系統 - Playwright 瀏覽器自動化
 """
 import asyncio
-from playwright.async_api import async_playwright, Page, Browser
+from playwright.async_api import Page, Browser
 from typing import Optional
 import re
 
+from .browser_manager import browser_manager
 from .models import OrderType
 
 
@@ -18,26 +19,13 @@ class TRABookingBrowser:
     
     async def start(self, headless: bool = True):
         """啟動瀏覽器"""
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=headless)
+        self.browser = await browser_manager.start(headless=headless)
+        self.playwright = browser_manager.playwright
     
     async def stop(self):
         """關閉瀏覽器"""
-        if self.browser:
-            try:
-                await self.browser.close()
-            except Exception:
-                pass
-            finally:
-                self.browser = None
-        if self.playwright:
-            try:
-                await self.playwright.stop()
-            except Exception:
-                pass
-            finally:
-                self.playwright = None
+        self.browser = None
+        self.playwright = None
     
     async def book_ticket(
         self,
@@ -72,7 +60,8 @@ class TRABookingBrowser:
         if not self.browser:
             await self.start()
         
-        page = await self.browser.new_page()
+        context = await self.browser.new_context()
+        page = await context.new_page()
         
         try:
             # Step 1: 前往訂票頁面
@@ -148,12 +137,7 @@ class TRABookingBrowser:
             async def handle_captcha():
                 """處理圖形驗證碼"""
                 print("開始處理驗證碼...")
-                try:
-                    import ddddocr
-                    ocr = ddddocr.DdddOcr(show_ad=False)
-                except Exception as e:
-                    print(f"ddddocr 初始化失敗: {e}")
-                    return False
+                ocr = browser_manager.get_ocr()
                 
                 max_retries = 3
                 for i in range(max_retries):
@@ -170,16 +154,10 @@ class TRABookingBrowser:
                         
                         if await captcha_img.count() == 0:
                             print("找不到驗證碼圖片元素")
-                            await page.screenshot(path="debug_captcha_missing.png")
                             return False
                             
-                        # 截取驗證碼圖片
-                        await captcha_img.screenshot(path="captcha.png")
-                        print("已截取驗證碼圖片")
-                        
-                        # 識別驗證碼
-                        with open("captcha.png", 'rb') as f:
-                            img_bytes = f.read()
+                        # 截取驗證碼圖片 (直接在記憶體辨識)
+                        img_bytes = await captcha_img.screenshot()
                         res = ocr.classification(img_bytes)
                         print(f"驗證碼識別結果: {res}")
                         
@@ -227,8 +205,6 @@ class TRABookingBrowser:
                                 # 檢查是否進入了資料確認頁 (modify)
                                 if "booking/modify" in page.url:
                                     print("進入資料確認頁面，嘗試確認...")
-                                    # 截圖以供參考
-                                    await page.screenshot(path="booking_modify.png")
                                     
                                     # 嘗試更多按鈕選擇器
                                     confirm_modify_btn = page.locator('button:has-text("直接"), button:has-text("下一步"), button:has-text("確認"), input[value="確認"], button.btn-3d, input[type="submit"]').last
@@ -258,9 +234,6 @@ class TRABookingBrowser:
 
             # 如果頁面有班次選擇，自動選擇第一個班次
             if "請選擇欲訂購車次" in page_content or "ticketSelectList" in page_content:
-                # 截圖 - 班次選擇頁
-                await page.screenshot(path="train_selection.png")
-                
                 # 嘗試選擇第一個可用班次的 checkbox
                 train_checkbox = page.locator('input[type="checkbox"][name*="ticketSelectList"]').first
                 if await train_checkbox.count() > 0:
@@ -299,9 +272,6 @@ class TRABookingBrowser:
             page_text = await page.inner_text("body")
             result = self._parse_booking_result(page_content, page_text)
             
-            # 截圖保存
-            await page.screenshot(path="booking_result.png")
-            
             return result
             
         except Exception as e:
@@ -315,7 +285,10 @@ class TRABookingBrowser:
                 "price": None
             }
         finally:
-            await page.close()
+            try:
+                await context.close()
+            except Exception:
+                pass
     
     def _parse_booking_result(self, html: str, text: str = "") -> dict:
         """解析訂票結果頁面"""
@@ -437,22 +410,9 @@ class TRABookingBrowser:
             if match_title:
                 print(match_title.group(1))
             
-            # 嘗試尋找 body 內容 (忽略大小寫)
-            body_start = html.lower().find("<body")
-            if body_start != -1:
-                print("HTML Body 摘要:")
-                # 印出 body 開始後的 2000 字元，並過濾掉 script
-                body_content = html[body_start:body_start+4000]
-                # 簡單移除 script 標籤內容以減少垃圾訊息
-                body_content = re.sub(r'<script.*?>.*?</script>', '', body_content, flags=re.DOTALL)
-                print(body_content[:3000])
-            else:
-                print("HTML 內容摘要 (前 2000 字元):")
-                print(html[:2000])
-            
             return {
                 "success": False,
-                "message": "訂票結果未知，請查看截圖 booking_result.png",
+                "message": "無法辨識台鐵訂票結果",
                 "booking_code": None,
                 "train_no": None,
                 "seat_info": None,

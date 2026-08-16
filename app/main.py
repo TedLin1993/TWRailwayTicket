@@ -1,9 +1,12 @@
 import asyncio
 import os
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from contextlib import asynccontextmanager
 
+from .browser_manager import browser_manager
+from .jobs import job_manager, cancellable_sleep
 from .models import (
     BookingRequest,
     BookingResponse,
@@ -16,11 +19,22 @@ from .models import (
 from .browser import tra_browser
 from .thsr_browser import thsr_browser
 
+def _extract_job_id(request: Request) -> str:
+    """從 Request Header 提取 X-Job-ID，或自動產生 12 碼 UUID。"""
+    try:
+        headers = getattr(request, "headers", None)
+        if headers is not None and hasattr(headers, "get"):
+            header_val = headers.get("X-Job-ID")
+            if isinstance(header_val, str) and header_val.strip():
+                return header_val.strip()
+    except Exception:
+        pass
+    return uuid.uuid4().hex[:12]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """應用程式生命週期管理"""
-    # 啟動時初始化瀏覽器 (使用無頭模式背景執行)
-    await tra_browser.start(headless=True)
     try:
         thsr_headless = os.getenv("THSR_HEADLESS", "true").lower() in {
             "1",
@@ -28,12 +42,12 @@ async def lifespan(app: FastAPI):
             "yes",
             "on",
         }
+        await browser_manager.start(headless=thsr_headless)
+        await tra_browser.start(headless=thsr_headless)
         await thsr_browser.start(headless=thsr_headless)
         yield
     finally:
-        # 關閉時清理瀏覽器；高鐵瀏覽器啟動失敗時也會關閉台鐵瀏覽器
-        await thsr_browser.stop()
-        await tra_browser.stop()
+        await browser_manager.stop()
 
 
 app = FastAPI(
@@ -68,7 +82,7 @@ def root():
 
 
 @app.post("/booking", response_model=BookingResponse, tags=["訂票"], summary="送出訂票")
-async def create_booking(booking: BookingRequest):
+async def create_booking(booking: BookingRequest, request: Request):
     """
     送出訂票請求至台鐵官方系統 (使用瀏覽器自動化)
     
@@ -84,50 +98,91 @@ async def create_booking(booking: BookingRequest):
     if booking.order_type == OrderType.BY_TRAIN and not booking.train_no:
         raise HTTPException(status_code=400, detail="依車次訂票時必須提供 train_no")
     
+    job_id = _extract_job_id(request)
+    cancel_event = await job_manager.register_job(job_id, service="tra")
+
+    if await request.is_disconnected():
+        await job_manager.update_job(job_id, status="cancelled", message="用戶端已中斷連線")
+        raise HTTPException(status_code=499, detail="用戶端已中斷連線")
+
     # 格式化日期
     ride_date_str = booking.ride_date.strftime("%Y/%m/%d")
     
-    # 無限重試循環
-    retry_count = 0
-    while True:
-        retry_count += 1
-        print(f"\n--- 開始第 {retry_count} 次訂票嘗試 ---")
-        try:
-            # 執行訂票
-            result = await tra_browser.book_ticket(
-                pid=booking.pid,
-                start_station=booking.start_station,
-                end_station=booking.end_station,
-                ride_date=ride_date_str,
-                order_type=booking.order_type,
-                train_no=booking.train_no,
-                start_time=booking.start_time,
-                end_time=booking.end_time,
-                qty=booking.qty
+    async with job_manager.semaphore:
+        if cancel_event.is_set() or await request.is_disconnected():
+            await job_manager.update_job(job_id, status="cancelled", message="工作已取消或用戶端斷線")
+            raise HTTPException(status_code=499, detail="訂票工作已取消或用戶端已中斷連線")
+
+        retry_count = 0
+        while not cancel_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                break
+
+            retry_count += 1
+            print(f"\n--- [TRA Job {job_id}] 開始第 {retry_count} 次訂票嘗試 ---")
+            await job_manager.update_job(
+                job_id,
+                status="running",
+                retry_count=retry_count,
+                message=f"執行第 {retry_count} 次訂票嘗試",
             )
-            
-            if result["success"]:
-                print(f"訂票成功！ (嘗試次數: {retry_count})")
-                return BookingResponse(
-                    success=result["success"],
-                    message=result["message"],
-                    booking_code=result.get("booking_code"),
-                    train_no=result.get("train_no"),
-                    train_type=result.get("train_type"),
-                    seat_info=result.get("seat_info"),
-                    price=result.get("price"),
-                    html_response=None
+
+            try:
+                result = await tra_browser.book_ticket(
+                    pid=booking.pid,
+                    start_station=booking.start_station,
+                    end_station=booking.end_station,
+                    ride_date=ride_date_str,
+                    order_type=booking.order_type,
+                    train_no=booking.train_no,
+                    start_time=booking.start_time,
+                    end_time=booking.end_time,
+                    qty=booking.qty,
                 )
-            
-            # 失敗處理
-            print(f"訂票失敗: {result['message']}")
-            print("等待 10 秒後重試...")
-            await asyncio.sleep(10)
-            
-        except Exception as e:
-            print(f"發生未預期錯誤: {e}")
-            print("等待 10 秒後重試...")
-            await asyncio.sleep(10)
+
+                if result["success"]:
+                    print(f"[TRA Job {job_id}] 訂票成功！ (嘗試次數: {retry_count})")
+                    await job_manager.update_job(
+                        job_id,
+                        status="completed",
+                        retry_count=retry_count,
+                        message=result["message"],
+                        booking_code=result.get("booking_code"),
+                    )
+                    return BookingResponse(
+                        success=True,
+                        message=result["message"],
+                        booking_code=result.get("booking_code"),
+                        train_no=result.get("train_no"),
+                        train_type=result.get("train_type"),
+                        seat_info=result.get("seat_info"),
+                        price=result.get("price"),
+                        html_response=None,
+                        job_id=job_id,
+                    )
+
+                print(f"[TRA Job {job_id}] 訂票失敗: {result['message']}")
+                await job_manager.update_job(
+                    job_id,
+                    retry_count=retry_count,
+                    message=f"第 {retry_count} 次失敗: {result['message']}",
+                )
+            except Exception as e:
+                print(f"[TRA Job {job_id}] 發生未預期錯誤: {e}")
+                await job_manager.update_job(
+                    job_id,
+                    retry_count=retry_count,
+                    message=f"第 {retry_count} 次異常: {str(e)}",
+                )
+
+            print(f"[TRA Job {job_id}] 等待 10 秒後重試 (可中斷)...")
+            should_continue = await cancellable_sleep(10.0, cancel_event, request)
+            if not should_continue:
+                break
+
+        await job_manager.update_job(job_id, status="cancelled", message="工作已取消或用戶端斷線")
+        raise HTTPException(status_code=499, detail="訂票工作已取消或用戶端已中斷連線")
 
 
 @app.get("/stations", tags=["車站"])
@@ -144,20 +199,97 @@ def get_stations():
 )
 async def create_thsr_booking(booking: THSRBookingRequest, request: Request):
     """持續重試單程成人票訂位，直到成功或呼叫端中斷連線。"""
-    retry_count = 0
-    while True:
-        retry_count += 1
-        result = await thsr_browser.book_ticket(booking)
-        if result["success"]:
-            print(f"高鐵訂票成功！(嘗試次數: {retry_count})")
-            return THSRBookingResponse(**result)
-        print(f"高鐵訂票失敗 (第 {retry_count} 次): {result['message']}")
-        if await request.is_disconnected():
-            raise HTTPException(status_code=499, detail="用戶端已中斷連線")
-        await asyncio.sleep(10)
+    job_id = _extract_job_id(request)
+    cancel_event = await job_manager.register_job(job_id, service="thsr")
+
+    if await request.is_disconnected():
+        await job_manager.update_job(job_id, status="cancelled", message="用戶端已中斷連線")
+        raise HTTPException(status_code=499, detail="用戶端已中斷連線")
+
+    async with job_manager.semaphore:
+        if cancel_event.is_set() or await request.is_disconnected():
+            await job_manager.update_job(job_id, status="cancelled", message="工作已取消或用戶端斷線")
+            raise HTTPException(status_code=499, detail="訂票工作已取消或用戶端已中斷連線")
+
+        retry_count = 0
+        while not cancel_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                break
+
+            retry_count += 1
+            print(f"\n--- [THSR Job {job_id}] 開始第 {retry_count} 次訂票嘗試 ---")
+            await job_manager.update_job(
+                job_id,
+                status="running",
+                retry_count=retry_count,
+                message=f"執行第 {retry_count} 次訂票嘗試",
+            )
+
+            result = await thsr_browser.book_ticket(booking)
+            if result["success"]:
+                print(f"[THSR Job {job_id}] 高鐵訂票成功！(嘗試次數: {retry_count})")
+                await job_manager.update_job(
+                    job_id,
+                    status="completed",
+                    retry_count=retry_count,
+                    message=result["message"],
+                    booking_code=result.get("booking_code"),
+                )
+                return THSRBookingResponse(
+                    job_id=job_id,
+                    **result,
+                )
+
+            print(f"[THSR Job {job_id}] 高鐵訂票失敗 (第 {retry_count} 次): {result['message']}")
+            await job_manager.update_job(
+                job_id,
+                retry_count=retry_count,
+                message=f"第 {retry_count} 次失敗: {result['message']}",
+            )
+
+            should_continue = await cancellable_sleep(10.0, cancel_event, request)
+            if not should_continue:
+                break
+
+        await job_manager.update_job(job_id, status="cancelled", message="工作已取消或用戶端斷線")
+        raise HTTPException(status_code=499, detail="訂票工作已取消或用戶端已中斷連線")
+
+
+@app.get("/booking/jobs", tags=["工作管理"], summary="查詢訂票工作清單")
+async def list_booking_jobs(limit: int = 50):
+    return await job_manager.list_jobs(limit=limit)
+
+
+@app.get("/booking/jobs/{job_id}", tags=["工作管理"], summary="查詢單一訂票工作狀態")
+async def get_booking_job(job_id: str):
+    job = await job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"找不到訂票工作: {job_id}")
+    return job
+
+
+@app.post("/booking/jobs/{job_id}/cancel", tags=["工作管理"], summary="取消訂票工作")
+@app.delete("/booking/jobs/{job_id}", tags=["工作管理"], summary="取消訂票工作")
+async def cancel_booking_job(job_id: str):
+    cancelled = await job_manager.cancel_job(job_id)
+    if not cancelled:
+        job = await job_manager.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"找不到訂票工作: {job_id}")
+        return {"success": False, "job_id": job_id, "message": f"工作目前狀態為 {job.status}，無法取消"}
+    return {"success": True, "job_id": job_id, "message": f"工作 {job_id} 已成功發送取消請求"}
 
 
 @app.get("/health", tags=["健康檢查"])
-def health_check():
+async def health_check():
     """健康檢查"""
-    return {"status": "ok", "browser": "playwright", "services": ["tra", "thsr"]}
+    browser_ok = bool(browser_manager.browser and browser_manager.browser.is_connected())
+    return {
+        "status": "ok" if browser_ok else "degraded",
+        "browser": "playwright",
+        "browser_connected": browser_ok,
+        "services": ["tra", "thsr"],
+        "active_jobs": job_manager.get_active_count(),
+        "max_concurrency": job_manager.max_concurrency,
+    }

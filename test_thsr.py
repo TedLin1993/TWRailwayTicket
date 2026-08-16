@@ -181,6 +181,7 @@ class THSRRetryTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         request = AsyncMock()
+        request.headers = {}
         request.is_disconnected.return_value = False
         failure = THSRBookingBrowser._failure("驗證碼錯誤")
         success = {
@@ -198,7 +199,7 @@ class THSRRetryTests(unittest.IsolatedAsyncioTestCase):
                 "book_ticket",
                 new=AsyncMock(side_effect=[failure, failure, success]),
             ) as book_ticket,
-            patch("app.main.asyncio.sleep", new=AsyncMock()) as sleep,
+            patch("app.main.cancellable_sleep", new=AsyncMock(return_value=True)) as sleep,
         ):
             response = await create_thsr_booking(booking, request)
 
